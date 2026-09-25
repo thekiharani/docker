@@ -39,10 +39,12 @@ from there, not from `compose.yml`.
 
 `postgres.Dockerfile` builds pgvector from source on the official
 `postgres:18-trixie` and copies only the built extension (~630 kB) onto a
-clean copy of that image, so the compilers never reach the final image:
+clean copy of that image, so the compilers never reach the final image.
 
-    docker build -f postgres.Dockerfile -t ghcr.io/thekiharani/postgres:18-trixie .
+GitHub Actions publishes it as `ghcr.io/thekiharani/postgres:18-trixie` for
+amd64 and arm64, each built on its own native runner, on every change to the
+Dockerfile and every Monday so the base image's security fixes land without a
+commit. Don't build it locally. To use it, set `POSTGRES_IMAGE` in `.env` to that tag.
 
-Bump pgvector with `--build-arg PGVECTOR_VERSION=…`, the Postgres major with
-`--build-arg PG_MAJOR=…`, and set `POSTGRES_IMAGE` in `.env` to the tag. After
+Bump pgvector with `PGVECTOR_VERSION` in the Dockerfile. After
 moving an existing volume to a newer pgvector, run `ALTER EXTENSION vector UPDATE;`.
