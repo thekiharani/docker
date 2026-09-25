@@ -69,8 +69,8 @@ data directory, so an existing volume carries over.
 ### Upgrading pgvector
 
 The daily check bumps `PGVECTOR_VERSION` by itself; to move sooner, edit it
-and push. Once the new image is running, update the extension in every database that has it (`template1`
-included, so new databases start current):
+and push. Once the new image is running, update the extension in every
+database that has it (`template1` included, so new databases start current):
 
     ALTER EXTENSION vector UPDATE;
 
