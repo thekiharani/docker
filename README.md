@@ -37,8 +37,10 @@ GitHub Actions (`.github/workflows/postgres.yml`) builds it for amd64 and arm64,
 each on its own native Ubuntu 26.04 runner, and joins them into one
 multi-platform tag. Don't build it locally.
 
-It builds on every push that changes the Dockerfile or the workflow. Every day
-at 04:17 UTC it also checks upstream and rebuilds only when something moved:
+It rebuilds only when the image would change: a push that changes
+`postgres.Dockerfile`, or a check that finds upstream has moved. The check runs
+every day at 04:17 UTC and on any push that changes only the workflow; pushes
+that touch nothing else run nothing. It rebuilds when it finds:
 
 - **Postgres or Debian:** the current `postgres:18-trixie` digest differs from
   the one the published image was built on. It rebuilds on the new base.

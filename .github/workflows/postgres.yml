@@ -38,6 +38,8 @@ jobs:
       bumped_from: ${{ steps.decide.outputs.bumped_from }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       # Scheduled workflows in public repos are disabled after 60 days without activity; enabling resets that.
       - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/postgres.yml/enable"
         env:
@@ -65,6 +67,7 @@ jobs:
       - id: decide
         env:
           EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
           FORCE: ${{ inputs.force }}
           BASE_DIGEST: ${{ steps.upstream.outputs.base_digest }}
           LATEST: ${{ steps.upstream.outputs.latest_pgvector }}
@@ -78,9 +81,18 @@ jobs:
           bumped_from=
           build=false
 
+          dockerfile_changed=false
           if [ "$EVENT" = push ]; then
+            if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+              || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- postgres.Dockerfile; then
+              dockerfile_changed=true
+            fi
+          fi
+
+          if [ "$dockerfile_changed" = true ]; then
             build=true
             sha_tag=true
+            echo "postgres.Dockerfile changed"
           else
             if [ -n "$LATEST" ] && [ "$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -1)" != "$PINNED" ]; then
               sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/" postgres.Dockerfile
