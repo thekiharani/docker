@@ -35,14 +35,27 @@ without `-march=native`, so it runs on any CPU of its architecture.
 
 GitHub Actions (`.github/workflows/postgres.yml`) builds it for amd64 and arm64,
 each on its own native Ubuntu 26.04 runner, and joins them into one
-multi-platform tag. It runs on every push that changes the Dockerfile or the
-workflow, every Monday at 04:00 UTC so the base image's security fixes land
-without a commit, and on demand from the Actions tab. Don't build it locally.
+multi-platform tag. Don't build it locally.
+
+It builds on every push that changes the Dockerfile or the workflow. Every day
+at 04:17 UTC it also checks upstream and rebuilds only when something moved:
+
+- **Postgres or Debian:** the current `postgres:18-trixie` digest differs from
+  the one the published image was built on. It rebuilds on the new base.
+- **pgvector:** a newer release than `PGVECTOR_VERSION`. It commits the bump to
+  the Dockerfile, builds that commit, and opens an issue reminding you to run
+  `ALTER EXTENSION vector UPDATE`.
+
+Each image records what it was built from in its labels:
+`org.opencontainers.image.base.digest`, `com.github.thekiharani.pgvector.version`
+and `org.opencontainers.image.revision`. That is how the check knows what is
+published. Run the workflow from the Actions tab to check now, and tick
+**force** to rebuild regardless.
 
 | tag | points at |
 |---|---|
-| `latest`, `18-trixie` | the newest build, including the Monday rebuilds |
-| `18-trixie-<short sha>` | the build of that commit; never moved |
+| `latest`, `18-trixie` | the newest build, including base-image rebuilds |
+| `18-trixie-<short sha>` | the build of that commit, including pgvector bumps; never moved |
 
 Set `POSTGRES_IMAGE` to `18-trixie` to follow updates, or to a sha tag to hold
 still. Then:
@@ -55,8 +68,8 @@ data directory, so an existing volume carries over.
 
 ### Upgrading pgvector
 
-Bump `PGVECTOR_VERSION` in the Dockerfile and push. Once the new image is
-running, update the extension in every database that has it (`template1`
+The daily check bumps `PGVECTOR_VERSION` by itself; to move sooner, edit it
+and push. Once the new image is running, update the extension in every database that has it (`template1`
 included, so new databases start current):
 
     ALTER EXTENSION vector UPDATE;
