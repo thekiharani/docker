@@ -22,9 +22,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -44,6 +44,9 @@ jobs:
           file: postgres.Dockerfile
           platforms: linux/${{ matrix.arch }}
           pull: true
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=postgres-${{ matrix.arch }}
           cache-to: type=gha,scope=postgres-${{ matrix.arch }},mode=max
@@ -60,7 +63,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       packages: write
     steps:
@@ -75,6 +78,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        run: |
+          tags="-t $IMAGE:latest -t $IMAGE:$TAG"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tags="$tags -t $IMAGE:$TAG-${GITHUB_SHA:0:7}"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - working-directory: /tmp/digests
-        run: docker buildx imagetools create -t "$IMAGE:$TAG" $(printf "$IMAGE@sha256:%s " *)
-      - run: docker buildx imagetools inspect "$IMAGE:$TAG"
+        run: docker buildx imagetools create ${{ steps.tags.outputs.tags }} $(printf "$IMAGE@sha256:%s " *)
+      - run: docker buildx imagetools inspect "$IMAGE:latest"

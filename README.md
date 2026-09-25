@@ -41,10 +41,18 @@ from there, not from `compose.yml`.
 `postgres:18-trixie` and copies only the built extension (~630 kB) onto a
 clean copy of that image, so the compilers never reach the final image.
 
-GitHub Actions publishes it as `ghcr.io/thekiharani/postgres:18-trixie` for
-amd64 and arm64, each built on its own native runner, on every change to the
-Dockerfile and every Monday so the base image's security fixes land without a
-commit. Don't build it locally. To use it, set `POSTGRES_IMAGE` in `.env` to that tag.
+GitHub Actions publishes it to `ghcr.io/thekiharani/postgres` for amd64 and
+arm64, each built on its own native runner, on every change to the Dockerfile
+and every Monday so the base image's security fixes land without a commit.
+Don't build it locally.
+
+| tag | points at |
+|---|---|
+| `latest`, `18-trixie` | the newest build, including the Monday rebuilds |
+| `18-trixie-<short sha>` | the build of that commit; never moved |
+
+Set `POSTGRES_IMAGE` in `.env` to `18-trixie` to follow updates, or to a sha
+tag to hold still.
 
 Bump pgvector with `PGVECTOR_VERSION` in the Dockerfile. After
 moving an existing volume to a newer pgvector, run `ALTER EXTENSION vector UPDATE;`.
