@@ -1,0 +1,73 @@
+name: db
+
+services:
+  noria_mysql:
+    image: ${MYSQL_IMAGE}
+    container_name: noria_mysql
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DP_PASS}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DP_PASS}
+    ports:
+      - "${MYSQL_PORT}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USER}", "-p${DP_PASS}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - norialabs
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: smartfin_postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DP_PASS}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - smartfin
+
+  redis:
+    image: redis:8.8
+    container_name: smartfin_redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${DP_PASS}"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${DP_PASS}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - smartfin
+
+networks:
+  smartfin:
+    external: true
+
+volumes:
+  postgres_data:
+    external: true
+  redis_data:
+    external: true

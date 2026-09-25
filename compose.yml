@@ -1,0 +1,63 @@
+name: noria
+
+services:
+  noria_postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: noria_postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DP_PASS}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - norialabs
+
+  noria_redis:
+    image: ${REDIS_IMAGE}
+    container_name: noria_redis
+    restart: unless-stopped
+    env_file: .env
+    command: ["redis-server", "--requirepass", "${DP_PASS}"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${DP_PASS}", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    networks:
+      - norialabs
+
+  noria_mailpit:
+    image: ${MAILPIT_IMAGE}
+    container_name: noria_mailpit
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${MAILPIT_PORT}:8025"
+    volumes:
+      - mailpit_data:/data
+    networks:
+      - norialabs
+
+networks:
+  norialabs:
+    external: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  mailpit_data:
