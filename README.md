@@ -23,7 +23,8 @@ Host ports are offset by +20 from their defaults so several stacks can coexist
 (3306→3326, 5432→5452, 6379→6399). One exception: Mailpit is on 8035 for the
 web UI, which is what it has always been.
 
-`compose-db.yml` is deliberately left as it was.
+`compose-db.yml` names its Postgres image in the file rather than `.env`, and
+it is the same `ghcr.io/thekiharani/postgres:18-trixie`.
 
 ## Pinning
 

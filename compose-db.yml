@@ -24,7 +24,7 @@ services:
     networks:
       - norialabs
   postgres:
-    image: pgvector/pgvector:pg18
+    image: ghcr.io/thekiharani/postgres:18-trixie
     container_name: smartfin_postgres
     restart: unless-stopped
     env_file: .env
