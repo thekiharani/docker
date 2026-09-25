@@ -44,9 +44,8 @@ that touch nothing else run nothing. It rebuilds when it finds:
 
 - **Postgres or Debian:** the current `postgres:18-trixie` digest differs from
   the one the published image was built on. It rebuilds on the new base.
-- **pgvector:** a newer release than `PGVECTOR_VERSION`. It commits the bump to
-  the Dockerfile, builds that commit, and opens an issue reminding you to run
-  `ALTER EXTENSION vector UPDATE`.
+- **pgvector:** a newer release than `PGVECTOR_VERSION`. It opens a pull request
+  bumping it, and merging that builds the new version like any Dockerfile change.
 
 Each image records what it was built from in its labels:
 `org.opencontainers.image.base.digest`, `com.github.thekiharani.pgvector.version`
@@ -70,8 +69,8 @@ data directory, so an existing volume carries over.
 
 ### Upgrading pgvector
 
-The daily check bumps `PGVECTOR_VERSION` by itself; to move sooner, edit it
-and push. Once the new image is running, update the extension in every
+The daily check opens a pull request for each new release; to move sooner, edit
+`PGVECTOR_VERSION` and push. Once the new image is running, update the extension in every
 database that has it (`template1` included, so new databases start current):
 
     ALTER EXTENSION vector UPDATE;
@@ -94,3 +93,12 @@ Tags move. Once a stack is working, lock an image to its digest:
 
 and paste the result into `.env` in place of the tag. The images all come from
 there, not from `compose.yml`.
+
+## Protection
+
+Only the owner pushes to `main` and `dev`. Anyone else opens a pull request,
+which needs the owner's approval; that is also how the pgvector bumps arrive,
+since GitHub won't let a personal repository exempt the Actions bot. No one,
+the owner included, can force-push or delete either branch. Workflows from
+outside contributors wait for approval, and only GitHub's and Docker's actions
+may run.

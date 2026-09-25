@@ -28,14 +28,13 @@ jobs:
     permissions:
       actions: write
       contents: write
+      pull-requests: write
     outputs:
       build: ${{ steps.decide.outputs.build }}
-      ref: ${{ steps.decide.outputs.ref }}
       sha_tag: ${{ steps.decide.outputs.sha_tag }}
       base: ${{ steps.upstream.outputs.base }}
       base_digest: ${{ steps.upstream.outputs.base_digest }}
-      pgvector: ${{ steps.decide.outputs.pgvector }}
-      bumped_from: ${{ steps.decide.outputs.bumped_from }}
+      pgvector: ${{ steps.upstream.outputs.pinned_pgvector }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -66,6 +65,7 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
       - id: decide
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           FORCE: ${{ inputs.force }}
@@ -75,10 +75,7 @@ jobs:
           PUBLISHED_BASE_DIGEST: ${{ steps.upstream.outputs.published_base_digest }}
           PUBLISHED_PGVECTOR: ${{ steps.upstream.outputs.published_pgvector }}
         run: |
-          ref=$GITHUB_SHA
           sha_tag=false
-          pgvector=$PINNED
-          bumped_from=
           build=false
 
           dockerfile_changed=false
@@ -95,25 +92,37 @@ jobs:
             echo "postgres.Dockerfile changed"
           else
             if [ -n "$LATEST" ] && [ "$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -1)" != "$PINNED" ]; then
-              sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/" postgres.Dockerfile
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git commit -qam "Bump pgvector to $LATEST"
-              git push -q origin "HEAD:$GITHUB_REF_NAME"
-              ref=$(git rev-parse HEAD)
-              pgvector=$LATEST
-              bumped_from=$PINNED
-              build=true
-              sha_tag=true
-              echo "pgvector $PINNED -> $LATEST"
+              branch="pgvector-$LATEST"
+              if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+                echo "pgvector $LATEST is out; its pull request is already open"
+              else
+                git switch -q -c "$branch"
+                sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/" postgres.Dockerfile
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git commit -qam "Bump pgvector to $LATEST"
+                git push -q origin "$branch"
+                gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
+                  --title "Bump pgvector to $LATEST" \
+                  --body "$(printf '%s\n' \
+                    "pgvector $LATEST is out; this image carries $PINNED." \
+                    "Release notes: https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md" \
+                    "" \
+                    "Merging builds and publishes \`$IMAGE:$TAG\` with it. Then pull it, recreate the container," \
+                    "and in every database that has the extension, \`template1\` included, run:" \
+                    "" \
+                    "    ALTER EXTENSION vector UPDATE;")"
+                git switch -q -
+                echo "pgvector $PINNED -> $LATEST: opened a pull request"
+              fi
             fi
             if [ "$BASE_DIGEST" != "$PUBLISHED_BASE_DIGEST" ]; then
               build=true
               echo "base image changed: ${PUBLISHED_BASE_DIGEST:-none} -> $BASE_DIGEST"
             fi
-            if [ "$pgvector" != "$PUBLISHED_PGVECTOR" ]; then
+            if [ "$PINNED" != "$PUBLISHED_PGVECTOR" ]; then
               build=true
-              echo "published pgvector ${PUBLISHED_PGVECTOR:-none} differs from $pgvector"
+              echo "published pgvector ${PUBLISHED_PGVECTOR:-none} differs from $PINNED"
             fi
             if [ "$FORCE" = true ]; then
               build=true
@@ -124,10 +133,7 @@ jobs:
           echo "build: $build"
           {
             echo "build=$build"
-            echo "ref=$ref"
             echo "sha_tag=$sha_tag"
-            echo "pgvector=$pgvector"
-            echo "bumped_from=$bumped_from"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -146,8 +152,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.check.outputs.ref }}
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -162,7 +166,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: PG_BASE=${{ needs.check.outputs.base }}@${{ needs.check.outputs.base_digest }}
           labels: |
-            org.opencontainers.image.revision=${{ needs.check.outputs.ref }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.base.name=docker.io/library/${{ needs.check.outputs.base }}
             org.opencontainers.image.base.digest=${{ needs.check.outputs.base_digest }}
             ${{ env.PGVECTOR_LABEL }}=${{ needs.check.outputs.pgvector }}
@@ -186,7 +190,6 @@ jobs:
     needs: [check, build]
     runs-on: ubuntu-26.04
     permissions:
-      issues: write
       packages: write
     steps:
       - uses: actions/download-artifact@v8
@@ -202,35 +205,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tags
         env:
-          REF: ${{ needs.check.outputs.ref }}
           SHA_TAG: ${{ needs.check.outputs.sha_tag }}
         run: |
           tags="-t $IMAGE:latest -t $IMAGE:$TAG"
           if [ "$SHA_TAG" = true ]; then
-            tags="$tags -t $IMAGE:$TAG-${REF:0:7}"
+            tags="$tags -t $IMAGE:$TAG-${GITHUB_SHA:0:7}"
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - working-directory: /tmp/digests
         run: docker buildx imagetools create ${{ steps.tags.outputs.tags }} $(printf "$IMAGE@sha256:%s " *)
       - run: docker buildx imagetools inspect "$IMAGE:latest"
-      - if: needs.check.outputs.bumped_from != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FROM: ${{ needs.check.outputs.bumped_from }}
-          TO: ${{ needs.check.outputs.pgvector }}
-          REF: ${{ needs.check.outputs.ref }}
-        run: |
-          gh issue create -R "$GITHUB_REPOSITORY" \
-            --title "pgvector $TO is published; update the extension in your databases" \
-            --body "$(printf '%s\n' \
-              "\`$IMAGE:$TAG\` now carries pgvector $TO (was $FROM), pinned as \`$IMAGE:$TAG-${REF:0:7}\`." \
-              "" \
-              "Pull it and recreate the container:" \
-              "" \
-              "    docker compose pull noria_postgres && docker compose up -d noria_postgres" \
-              "" \
-              "then, in every database that has the extension, \`template1\` included:" \
-              "" \
-              "    ALTER EXTENSION vector UPDATE;" \
-              "" \
-              "Release notes: https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md")"
