@@ -15,10 +15,11 @@ services:
       - "${MYSQL_PORT}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USER}", "-p${DP_PASS}"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
+      start_interval: 3s
     volumes:
       - mysql_data:/var/lib/mysql
     networks:
@@ -36,10 +37,11 @@ services:
       - "${POSTGRES_PORT}:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${DB_USER}"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
+      start_interval: 3s
     volumes:
       - postgres_data:/var/lib/postgresql
     networks:
@@ -54,7 +56,9 @@ services:
       - "${REDIS_PORT}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${DP_PASS}", "ping"]
-      interval: 30s
+      interval: 60s
+      start_period: 60s
+      start_interval: 3s
       timeout: 10s
       retries: 5
     volumes:
