@@ -2,7 +2,7 @@
 
 Local service stacks, run on OrbStack, and the Postgres image they use.
 
-- `compose.yml` — the **noria** stack: PostgreSQL with pgvector, Redis and
+- `compose.yml` — the **noria** stack: MariaDB, PostgreSQL with pgvector, Redis and
   Mailpit, on the external `norialabs` network. This is the one that runs.
 - `compose-db.yml` — reference only, never run. It keeps the older MySQL and
   smartfin service definitions to copy from.
@@ -16,7 +16,8 @@ images fix.
 
 | variable | value | used by |
 |---|---|---|
-| `DB_USER` / `DP_PASS` | shared | postgres, redis |
+| `DB_USER` / `DP_PASS` | shared | mariadb, postgres, redis |
+| `MARIADB_IMAGE` / `MARIADB_PORT` / `MARIADB_DATABASE` | `mariadb:13.0`, 3326, `norialabs` | mariadb |
 | `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:18-trixie`, 5452, `norialabs` | postgres |
 | `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.10-trixie`, 6399 | redis |
 | `MAILPIT_IMAGE` / `MAILPIT_PORT` | `axllent/mailpit`, 8035 | mailpit |
@@ -25,6 +26,20 @@ images fix.
 Host ports are offset by +20 from their defaults so several stacks can coexist
 (5432→5452, 6379→6399, 3306→3326). Mailpit's web UI is the exception, on 8035
 as it always has been.
+
+Use major.minor image tags to follow patch updates within the chosen release
+series, with the Trixie flavor where available. MariaDB 13.0 has no official
+Trixie flavor; `mariadb:13.0` uses Ubuntu Resolute.
+
+MariaDB uses the external `noria_mariadb_data` volume, mounted at
+`/var/lib/mysql`. Create it before the first start:
+
+    docker volume create noria_mariadb_data
+    docker compose pull noria_mariadb
+    docker compose up -d --wait noria_mariadb
+
+Connect from the host at `localhost:3326`, or from the `norialabs` network at
+`noria_mariadb:3306`, using `MARIADB_DATABASE`, `DB_USER` and `DP_PASS` from `.env`.
 
 ## Postgres with pgvector
 

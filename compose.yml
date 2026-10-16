@@ -1,6 +1,30 @@
 name: noria
 
 services:
+  noria_mariadb:
+    image: ${MARIADB_IMAGE}
+    container_name: noria_mariadb
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DP_PASS}
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DP_PASS}
+    ports:
+      - "${MARIADB_PORT}:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+      start_interval: 3s
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - norialabs
+
   noria_postgres:
     image: ${POSTGRES_IMAGE}
     container_name: noria_postgres
@@ -61,6 +85,9 @@ networks:
     external: true
 
 volumes:
+  mariadb_data:
+    name: noria_mariadb_data
+    external: true
   postgres_data:
   redis_data:
   mailpit_data:
