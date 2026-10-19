@@ -20,7 +20,7 @@ images fix.
 | `MARIADB_IMAGE` / `MARIADB_PORT` / `MARIADB_DATABASE` | `mariadb:13.0`, 3326, `norialabs` | mariadb |
 | `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:18-trixie`, 5452, `norialabs` | postgres |
 | `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.10-trixie`, 6399 | redis |
-| `MAILPIT_IMAGE` / `MAILPIT_PORT` | `axllent/mailpit`, 8035 | mailpit |
+| `MAILPIT_IMAGE` / `MAILPIT_PORT` / `MAILPIT_SMTP_PORT` | `axllent/mailpit`, 8035, 1035 (loopback only) | mailpit |
 | `MYSQL_IMAGE` / `MYSQL_PORT` / `MYSQL_DATABASE` | `mysql:8.4`, 3326, `norialabs` | `compose-db.yml` only |
 
 Host ports are offset by +20 from their defaults so several stacks can coexist
