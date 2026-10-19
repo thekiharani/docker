@@ -1,0 +1,259 @@
+name: pg-backup
+
+on:
+  push:
+    branches: [main]
+    paths: [pg-backup.Dockerfile, pg-backup, .github/workflows/pg-backup.yml]
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if nothing upstream changed
+        type: boolean
+        default: false
+
+concurrency:
+  group: pg-backup
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/thekiharani/pg-backup
+  TAG: 18-trixie
+  CLIENT_LABEL: com.github.thekiharani.postgresql-client.version
+  RCLONE_LABEL: com.github.thekiharani.rclone.version
+  BUILD_BASE_LABEL: com.github.thekiharani.build-base.digest
+  GO_BASE_LABEL: com.github.thekiharani.go-base.digest
+
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      sha_tag: ${{ steps.decide.outputs.sha_tag }}
+      base: ${{ steps.upstream.outputs.base }}
+      base_digest: ${{ steps.upstream.outputs.base_digest }}
+      build_base: ${{ steps.upstream.outputs.build_base }}
+      build_base_digest: ${{ steps.upstream.outputs.build_base_digest }}
+      go_base: ${{ steps.upstream.outputs.go_base }}
+      go_base_digest: ${{ steps.upstream.outputs.go_base_digest }}
+      client: ${{ steps.upstream.outputs.latest_client }}
+      rclone: ${{ steps.upstream.outputs.pinned_rclone }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Scheduled workflows in public repos are disabled after 60 days without activity; enabling resets that.
+      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/pg-backup.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pg_major=$(sed -nE 's/^ARG PG_MAJOR=(.+)$/\1/p' pg-backup.Dockerfile)
+          base=$(sed -nE 's/^ARG RUNTIME_BASE=(.+)$/\1/p' pg-backup.Dockerfile)
+          base_digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
+          build_base=$(sed -nE 's/^ARG BUILD_BASE=(.+)$/\1/p' pg-backup.Dockerfile)
+          build_base_digest=$(docker buildx imagetools inspect "$build_base" --format '{{json .Manifest}}' | jq -r .digest)
+          go_base=$(sed -nE 's/^ARG GO_BASE=(.+)$/\1/p' pg-backup.Dockerfile)
+          go_base_digest=$(docker buildx imagetools inspect "$go_base" --format '{{json .Manifest}}' | jq -r .digest)
+          latest_client=$(curl -fsSL https://apt.postgresql.org/pub/repos/apt/dists/trixie-pgdg/main/binary-amd64/Packages.gz \
+            | gzip -dc | awk -v p="Package: postgresql-client-$pg_major" '$0 == p {f=1} f && /^Version:/ {print $2; f=0}' | sort -V | tail -1)
+          latest_rclone=$(gh api repos/rclone/rclone/releases/latest --jq .tag_name | sed -E 's/^v//')
+          pinned_rclone=$(sed -nE 's/^ARG RCLONE_VERSION=(.+)$/\1/p' pg-backup.Dockerfile)
+          published=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
+            | jq -c '."linux/amd64".config.Labels // {}' || echo '{}')
+          {
+            echo "base=$base"
+            echo "base_digest=$base_digest"
+            echo "build_base=$build_base"
+            echo "build_base_digest=$build_base_digest"
+            echo "go_base=$go_base"
+            echo "go_base_digest=$go_base_digest"
+            echo "latest_client=$latest_client"
+            echo "latest_rclone=$latest_rclone"
+            echo "pinned_rclone=$pinned_rclone"
+            echo "published_base_digest=$(jq -r '."org.opencontainers.image.base.digest" // ""' <<< "$published")"
+            echo "published_build_base_digest=$(jq -r --arg l "$BUILD_BASE_LABEL" '.[$l] // ""' <<< "$published")"
+            echo "published_go_base_digest=$(jq -r --arg l "$GO_BASE_LABEL" '.[$l] // ""' <<< "$published")"
+            echo "published_client=$(jq -r --arg l "$CLIENT_LABEL" '.[$l] // ""' <<< "$published")"
+            echo "published_rclone=$(jq -r --arg l "$RCLONE_LABEL" '.[$l] // ""' <<< "$published")"
+          } | tee -a "$GITHUB_OUTPUT"
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          FORCE: ${{ inputs.force }}
+          BASE_DIGEST: ${{ steps.upstream.outputs.base_digest }}
+          BUILD_BASE_DIGEST: ${{ steps.upstream.outputs.build_base_digest }}
+          GO_BASE_DIGEST: ${{ steps.upstream.outputs.go_base_digest }}
+          LATEST_CLIENT: ${{ steps.upstream.outputs.latest_client }}
+          LATEST_RCLONE: ${{ steps.upstream.outputs.latest_rclone }}
+          PINNED_RCLONE: ${{ steps.upstream.outputs.pinned_rclone }}
+          PUBLISHED_BASE_DIGEST: ${{ steps.upstream.outputs.published_base_digest }}
+          PUBLISHED_BUILD_BASE_DIGEST: ${{ steps.upstream.outputs.published_build_base_digest }}
+          PUBLISHED_GO_BASE_DIGEST: ${{ steps.upstream.outputs.published_go_base_digest }}
+          PUBLISHED_CLIENT: ${{ steps.upstream.outputs.published_client }}
+          PUBLISHED_RCLONE: ${{ steps.upstream.outputs.published_rclone }}
+        run: |
+          sha_tag=false
+          build=false
+
+          sources_changed=false
+          if [ "$EVENT" = push ]; then
+            if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+              || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- pg-backup.Dockerfile pg-backup; then
+              sources_changed=true
+            fi
+          fi
+
+          if [ "$sources_changed" = true ]; then
+            build=true
+            sha_tag=true
+            echo "pg-backup.Dockerfile or pg-backup changed"
+          else
+            if [ -n "$LATEST_RCLONE" ] && [ "$(printf '%s\n%s\n' "$PINNED_RCLONE" "$LATEST_RCLONE" | sort -V | tail -1)" != "$PINNED_RCLONE" ]; then
+              branch="rclone-$LATEST_RCLONE"
+              if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+                echo "rclone $LATEST_RCLONE is out; its pull request is already open"
+              else
+                git switch -q -c "$branch"
+                sed -i -E "s/^ARG RCLONE_VERSION=.+$/ARG RCLONE_VERSION=$LATEST_RCLONE/" pg-backup.Dockerfile
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git commit -qam "Bump rclone to $LATEST_RCLONE"
+                git push -q origin "$branch"
+                gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
+                  --title "Bump rclone to $LATEST_RCLONE" \
+                  --body "$(printf '%s\n' \
+                    "rclone $LATEST_RCLONE is out; this image carries $PINNED_RCLONE." \
+                    "Release notes: https://rclone.org/changelog/" \
+                    "" \
+                    "Merging compiles it with only the S3 and local backends, publishes \`$IMAGE:$TAG\`, and the hosts pull it.")"
+                git switch -q -
+                echo "rclone $PINNED_RCLONE -> $LATEST_RCLONE: opened a pull request"
+              fi
+            fi
+            if [ "$BASE_DIGEST" != "$PUBLISHED_BASE_DIGEST" ]; then
+              build=true
+              echo "runtime base changed: ${PUBLISHED_BASE_DIGEST:-none} -> $BASE_DIGEST"
+            fi
+            if [ "$BUILD_BASE_DIGEST" != "$PUBLISHED_BUILD_BASE_DIGEST" ]; then
+              build=true
+              echo "build base changed: ${PUBLISHED_BUILD_BASE_DIGEST:-none} -> $BUILD_BASE_DIGEST"
+            fi
+            if [ "$GO_BASE_DIGEST" != "$PUBLISHED_GO_BASE_DIGEST" ]; then
+              build=true
+              echo "go base changed: ${PUBLISHED_GO_BASE_DIGEST:-none} -> $GO_BASE_DIGEST"
+            fi
+            if [ -n "$LATEST_CLIENT" ] && [ "$LATEST_CLIENT" != "$PUBLISHED_CLIENT" ]; then
+              build=true
+              echo "postgresql-client ${PUBLISHED_CLIENT:-none} -> $LATEST_CLIENT"
+            fi
+            if [ "$PINNED_RCLONE" != "$PUBLISHED_RCLONE" ]; then
+              build=true
+              echo "published rclone ${PUBLISHED_RCLONE:-none} differs from $PINNED_RCLONE"
+            fi
+            if [ "$FORCE" = true ]; then
+              build=true
+              echo "forced"
+            fi
+          fi
+
+          echo "build: $build"
+          {
+            echo "build=$build"
+            echo "sha_tag=$sha_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: pg-backup.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            RUNTIME_BASE=${{ needs.check.outputs.base }}@${{ needs.check.outputs.base_digest }}
+            BUILD_BASE=${{ needs.check.outputs.build_base }}@${{ needs.check.outputs.build_base_digest }}
+            GO_BASE=${{ needs.check.outputs.go_base }}@${{ needs.check.outputs.go_base_digest }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.base.name=${{ needs.check.outputs.base }}
+            org.opencontainers.image.base.digest=${{ needs.check.outputs.base_digest }}
+            ${{ env.BUILD_BASE_LABEL }}=${{ needs.check.outputs.build_base_digest }}
+            ${{ env.GO_BASE_LABEL }}=${{ needs.check.outputs.go_base_digest }}
+            ${{ env.CLIENT_LABEL }}=${{ needs.check.outputs.client }}
+            ${{ env.RCLONE_LABEL }}=${{ needs.check.outputs.rclone }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=pg-backup-${{ matrix.arch }}
+          cache-to: type=gha,scope=pg-backup-${{ matrix.arch }},mode=max
+      - run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-26.04
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        env:
+          SHA_TAG: ${{ needs.check.outputs.sha_tag }}
+        run: |
+          tags="-t $IMAGE:latest -t $IMAGE:$TAG"
+          if [ "$SHA_TAG" = true ]; then
+            tags="$tags -t $IMAGE:$TAG-${GITHUB_SHA:0:7}"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+      - working-directory: /tmp/digests
+        run: docker buildx imagetools create ${{ steps.tags.outputs.tags }} $(printf "$IMAGE@sha256:%s " *)
+      - run: docker buildx imagetools inspect "$IMAGE:latest"

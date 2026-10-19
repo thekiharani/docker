@@ -1,0 +1,154 @@
+#!/bin/sh
+set -eu
+set -o pipefail
+
+: "${BACKUP_R2_BUCKET:?}" "${BACKUP_PREFIX:=postgres}" "${BACKUP_REMOTE:=r2}" "${BACKUP_MINUTE:=15}"
+: "${BACKUP_KEEP_HOURLY:=48h}" "${BACKUP_KEEP_DAILY:=30d}" "${BACKUP_KEEP_WEEKLY:=12w}"
+: "${BACKUP_DAILY_HOUR:=0}" "${BACKUP_VERIFY_DAY:=}" "${BACKUP_EXCLUDE_DBS:=}" "${BACKUP_HEARTBEAT_URL:=}"
+
+root="$BACKUP_REMOTE:$BACKUP_R2_BUCKET/$BACKUP_PREFIX"
+verify_db=pgbackup_verify
+s3="--s3-no-head --s3-no-check-bucket"
+
+databases() {
+  psql -d postgres -Atc "select datname from pg_database where not datistemplate and datallowconn and datname <> '$verify_db' order by 1" \
+    | if [ -n "$BACKUP_EXCLUDE_DBS" ]; then grep -Ev -- "$BACKUP_EXCLUDE_DBS" || true; else cat; fi
+}
+
+is_daily_hour() {
+  local hour=${1#0} daily=${BACKUP_DAILY_HOUR#0}
+  [ "${hour:-0}" -eq "${daily:-0}" ]
+}
+
+scratch() {
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT
+}
+
+drop_verify_db() {
+  psql -d postgres -qAt -c "set client_min_messages = warning" -c "drop database if exists $verify_db"
+}
+
+dump() {
+  local work=$1 failed=0 db
+  pg_dumpall --roles-only > "$work/roles.sql" || failed=1
+  for db in $(databases); do
+    pg_dump -Fc -Z zstd -d "$db" -f "$work/$db.dump" && pg_restore --list "$work/$db.dump" > /dev/null \
+      || { echo "dump failed: $db" >&2; rm -f "$work/$db.dump"; failed=1; }
+  done
+  (cd "$work" && sha256sum -- * > .manifest && mv .manifest manifest.sha256)
+  return "$failed"
+}
+
+upload() {
+  local work=$1 dest=$2
+  rclone copy "$work" "$dest" --exclude /manifest.sha256 --no-check-dest $s3
+  rclone copyto "$work/manifest.sha256" "$dest/manifest.sha256" --no-check-dest $s3
+}
+
+promote() {
+  local stamp=$1 hour=$2 dow=$3 day=${1%/*}
+  is_daily_hour "$hour" || return 0
+  if [ -n "$BACKUP_KEEP_DAILY" ]; then
+    rclone copy "$root/hourly/$stamp" "$root/daily/$day" --no-check-dest $s3
+  fi
+  if [ -n "$BACKUP_KEEP_WEEKLY" ] && [ "$dow" = 7 ]; then
+    rclone copy "$root/hourly/$stamp" "$root/weekly/$day" --no-check-dest $s3
+  fi
+}
+
+prune() {
+  local tier keep failed=0
+  for tier in hourly daily weekly; do
+    case $tier in
+      hourly) keep=$BACKUP_KEEP_HOURLY ;;
+      daily) keep=$BACKUP_KEEP_DAILY ;;
+      weekly) keep=$BACKUP_KEEP_WEEKLY ;;
+    esac
+    [ -n "$keep" ] || continue
+    rclone lsf --max-depth 1 "$root/$tier" > /dev/null 2>&1 || continue
+    rclone delete "$root/$tier" --min-age "$keep" --use-server-modtime $s3 \
+      || { echo "prune $tier older than $keep failed" >&2; failed=1; }
+  done
+  return "$failed"
+}
+
+verify() {
+  local work=$1 failed=0 dump db
+  for dump in "$work"/*.dump; do
+    db=$(basename "$dump" .dump)
+    if ! { drop_verify_db && createdb "$verify_db"; }; then
+      echo "verify failed: $db: no fresh $verify_db" >&2
+      failed=1
+      continue
+    fi
+    if pg_restore --no-owner --no-privileges --exit-on-error -d "$verify_db" "$dump"; then
+      echo "verified $db: $(psql -d "$verify_db" -Atc "select count(*) from pg_tables where schemaname not in ('pg_catalog', 'information_schema')") tables"
+    else
+      echo "verify failed: $db" >&2
+      failed=1
+    fi
+  done
+  drop_verify_db
+  return "$failed"
+}
+
+once() {
+  local flag=${1:-} failed=0 stamp hour dow
+  stamp=$(date -u +%Y-%m-%d/%H%M)
+  hour=$(date -u +%H)
+  dow=$(date -u +%u)
+  scratch
+
+  dump "$work" || failed=1
+  upload "$work" "$root/hourly/$stamp"
+  echo "uploaded $(ls "$work" | wc -l | tr -d ' ') files to $root/hourly/$stamp"
+  promote "$stamp" "$hour" "$dow"
+  prune || failed=1
+  if [ "$flag" = --verify ] || { [ -n "$BACKUP_VERIFY_DAY" ] && [ "$dow" = "$BACKUP_VERIFY_DAY" ] && is_daily_hour "$hour"; }; then
+    verify "$work" || failed=1
+  fi
+
+  if [ "$failed" -eq 0 ]; then
+    touch /tmp/last-success
+    rm -f /tmp/last-failure
+    [ -z "$BACKUP_HEARTBEAT_URL" ] || rclone copyurl "$BACKUP_HEARTBEAT_URL" --stdout > /dev/null || echo "heartbeat ping failed" >&2
+  fi
+  return "$failed"
+}
+
+restore() {
+  [ $# -ge 2 ] || { echo "usage: pg-backup restore <tier>/<stamp> <db> [target]" >&2; exit 64; }
+  local path=$1 db=$2 target=${3:-$2}
+  scratch
+  rclone copy "$root/$path" "$work" --include "/$db.dump" --include /manifest.sha256 $s3
+  [ -e "$work/manifest.sha256" ] || { echo "$path has no manifest" >&2; exit 1; }
+  grep -q -- " $db.dump\$" "$work/manifest.sha256" || { echo "$path has no $db.dump" >&2; exit 1; }
+  (cd "$work" && grep -- " $db.dump\$" manifest.sha256 | sha256sum -c -s)
+  [ "$(psql -d postgres -Atc "select 1 from pg_database where datname = '$target'")" = 1 ] || createdb "$target"
+  pg_restore --no-owner --no-privileges --exit-on-error -d "$target" "$work/$db.dump"
+  echo "restored $path/$db.dump into $target; roles are in $path/roles.sql"
+}
+
+health() {
+  pg_isready -q && [ ! -e /tmp/last-failure ] && [ -n "$(find /tmp/last-success /tmp/started -mmin -125 2> /dev/null)" ]
+}
+
+case ${1:-run} in
+  run)
+    touch /tmp/started
+    minute=${BACKUP_MINUTE#0}
+    while true; do
+      now=$(date -u +%s)
+      next=$(( now / 3600 * 3600 + ${minute:-0} * 60 ))
+      [ "$next" -gt "$now" ] || next=$(( next + 3600 ))
+      sleep $(( next - now ))
+      "$0" once || { touch /tmp/last-failure; echo "backup run failed at $(date -u +%FT%TZ)" >&2; }
+    done ;;
+  once) once "${2:-}" ;;
+  verify) once --verify ;;
+  restore) shift; restore "$@" ;;
+  list) rclone lsf -R --dirs-only "$root/${2:-hourly}" ;;
+  health) health ;;
+  *) echo "usage: pg-backup [run | once [--verify] | verify | restore <tier>/<stamp> <db> [target] | list [tier] | health]" >&2; exit 64 ;;
+esac

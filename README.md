@@ -8,6 +8,8 @@ Local service stacks, run on OrbStack, and the Postgres image they use.
   smartfin service definitions to copy from.
 - `postgres.Dockerfile` — the image behind `noria_postgres`, published to
   `ghcr.io/thekiharani/postgres`.
+- `pg-backup.Dockerfile` and `pg-backup` — the backup sidecar the production
+  database stacks run, published to `ghcr.io/thekiharani/pg-backup`.
 
 Everything in `compose.yml` is driven from `.env`, which is not committed:
 images, ports, database names and credentials. The only literals in the file
@@ -101,6 +103,114 @@ new version, in each database it names:
 
     REINDEX DATABASE <db>;
     ALTER DATABASE <db> REFRESH COLLATION VERSION;
+
+## Postgres backups
+
+`pg-backup.Dockerfile` builds `ghcr.io/thekiharani/pg-backup` on
+`gcr.io/distroless/base-debian13`, which brings only glibc, OpenSSL, zlib, CA
+certificates and tzdata. A throwaway `debian:trixie-slim` stage installs
+`postgresql-client-18` from PGDG, after checking the signing key's fingerprint,
+and stages what the runtime needs: the seven client binaries (`pg_dump`,
+`pg_dumpall`, `pg_restore`, `psql`, `pg_isready`, `createdb`, `dropdb`), the
+shared libraries `ldd` says they need beyond what distroless already has, and a
+static busybox exposing only the fifteen applets the script calls. A Go stage
+compiles `rclone` from the pinned release tag with only the `s3` and `local`
+backends and only the eleven subcommands the script and its operator use, which
+is a fraction of the stock binary. There is no package manager, no perl, no
+`pg_wrapper` and no shell beyond busybox `sh`; the script is POSIX sh. It runs
+as distroless's `nonroot` user (uid 65532) and needs no capabilities.
+
+Every hour at `BACKUP_MINUTE` the `pg-backup` script dumps the roles and every
+database on the server, checks each archive with `pg_restore --list`, writes a
+`manifest.sha256`, uploads the set to `<prefix>/hourly/<date>/<HHMM>` and uploads
+the manifest last, so a run that died mid-upload has no manifest. At
+`BACKUP_DAILY_HOUR` it also copies that run server-side to `daily/<date>`, and on
+Sundays to `weekly/<date>`. Each tier is then pruned to its own age. Dumps use
+custom format with zstd compression.
+
+Retention is driven entirely by environment, as rclone age strings. Empty
+disables a tier.
+
+| variable | default | meaning |
+|---|---|---|
+| `BACKUP_R2_BUCKET` | required | bucket name |
+| `BACKUP_PREFIX` | `postgres` | path inside the bucket; one per host |
+| `BACKUP_REMOTE` | `r2` | rclone remote name, configured through `RCLONE_CONFIG_<REMOTE>_*` |
+| `BACKUP_MINUTE` | `15` | minute past each hour to run |
+| `BACKUP_KEEP_HOURLY` | `48h` | age at which hourly runs are deleted |
+| `BACKUP_KEEP_DAILY` | `30d` | age at which daily copies are deleted |
+| `BACKUP_KEEP_WEEKLY` | `12w` | age at which weekly copies are deleted |
+| `BACKUP_DAILY_HOUR` | `0` | UTC hour whose run is promoted to daily and weekly |
+| `BACKUP_VERIFY_DAY` | off | ISO weekday (1 Monday to 7 Sunday) on which the daily run also restores every dump into a scratch database |
+| `BACKUP_EXCLUDE_DBS` | none | extended regex; matching database names are skipped |
+| `BACKUP_HEARTBEAT_URL` | none | URL fetched after each successful run, for a dead-man's switch |
+| `PGHOST` / `PGUSER` / `PGPASSWORD` | | the usual libpq variables; the user needs `CREATEDB` for verification |
+
+Subcommands, all run through `docker exec pg-backup pg-backup ...`:
+
+| command | does |
+|---|---|
+| `once` | one run now; `once --verify` also restores each dump into `pgbackup_verify` and drops it |
+| `list [tier]` | the stamps held in `hourly` (default), `daily` or `weekly` |
+| `restore <tier>/<stamp> <db> [target]` | downloads that database's dump, checks it against the manifest and restores it into `target` (created if missing; defaults to `db`) |
+| `health` | the container healthcheck: Postgres reachable, no failed run, and a success or start within the last 125 minutes |
+
+A compose service for a host stack:
+
+    backup:
+      image: ghcr.io/thekiharani/pg-backup:18-trixie
+      container_name: pg-backup
+      restart: unless-stopped
+      environment:
+        PGHOST: postgres
+        PGUSER: ${POSTGRES_USER}
+        PGPASSWORD: ${POSTGRES_PASSWORD}
+        PGDATABASE: postgres
+        BACKUP_R2_BUCKET: ${BACKUP_R2_BUCKET}
+        BACKUP_PREFIX: noria-hz1/postgres
+        BACKUP_KEEP_HOURLY: 48h
+        BACKUP_KEEP_DAILY: 30d
+        BACKUP_KEEP_WEEKLY: 12w
+        BACKUP_VERIFY_DAY: "7"
+        BACKUP_HEARTBEAT_URL: ${BACKUP_HEARTBEAT_URL}
+        RCLONE_CONFIG_R2_TYPE: s3
+        RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+        RCLONE_CONFIG_R2_ENDPOINT: ${BACKUP_R2_ENDPOINT}
+        RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${BACKUP_R2_ACCESS_KEY_ID}
+        RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${BACKUP_R2_SECRET_ACCESS_KEY}
+      depends_on:
+        postgres:
+          condition: service_healthy
+      networks: [norialabs]
+      security_opt: [no-new-privileges:true]
+      cap_drop: [ALL]
+      logging:
+        driver: json-file
+        options: { max-size: "10m", max-file: "5" }
+
+The image carries its own healthcheck, so the service needs none. Hosts that ran
+the earlier local build replace `build:` with `image:`, drop `BACKUP_RETENTION`
+in favour of the three `BACKUP_KEEP_*` variables, and remove the `healthcheck:`
+block. Existing objects under the prefix are left alone; nothing is written at
+the prefix root any more, so delete the old `<date>/` folders by hand once the
+new tiers hold what you need.
+
+GitHub Actions (`.github/workflows/pg-backup.yml`) builds it exactly like the
+Postgres image: amd64 and arm64 on native runners, joined into one tag, and only
+when something would change. It rebuilds when the Dockerfile or the script
+changes, when the distroless, `debian:trixie-slim` or `golang:1-trixie` digest
+moves (a Go toolchain update changes the TLS and HTTP code compiled into rclone),
+or when PGDG publishes a newer `postgresql-client-18`. A new rclone release opens
+a pull request bumping `RCLONE_VERSION`. The labels
+`org.opencontainers.image.base.digest`, `com.github.thekiharani.build-base.digest`,
+`com.github.thekiharani.go-base.digest`,
+`com.github.thekiharani.postgresql-client.version` and
+`com.github.thekiharani.rclone.version` record what is published.
+
+| tag | points at |
+|---|---|
+| `latest`, `18-trixie` | the newest build, including base and client rebuilds |
+| `18-trixie-<short sha>` | the build of that commit; never moved |
 
 ## Pinning
 
