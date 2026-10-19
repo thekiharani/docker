@@ -1,15 +1,26 @@
 # docker
 
-Local service stacks, run on OrbStack, and the Postgres image they use.
+Two images every Noria Labs database stack runs, built and kept current by
+GitHub Actions and published to GHCR, plus the local OrbStack stacks that use
+them.
 
-- `compose.yml` — the **noria** stack: MariaDB, PostgreSQL with pgvector, Redis and
-  Mailpit, on the external `norialabs` network. This is the one that runs.
+- `postgres.Dockerfile` — PostgreSQL 18 on Debian trixie with pgvector compiled
+  in, published as `ghcr.io/thekiharani/postgres`. Runs on every host and
+  locally.
+- `pg-backup.Dockerfile` and `pg-backup` — the backup sidecar beside each
+  Postgres: hourly `pg_dump` of every database to Cloudflare R2 with hourly,
+  daily and weekly retention and verified restores, published as
+  `ghcr.io/thekiharani/pg-backup`.
+- `compose.yml` — the local **noria** stack: MariaDB, PostgreSQL with pgvector,
+  Redis and Mailpit, on the external `norialabs` network.
 - `compose-db.yml` — reference only, never run. It keeps the older MySQL and
   smartfin service definitions to copy from.
-- `postgres.Dockerfile` — the image behind `noria_postgres`, published to
-  `ghcr.io/thekiharani/postgres`.
-- `pg-backup.Dockerfile` and `pg-backup` — the backup sidecar the production
-  database stacks run, published to `ghcr.io/thekiharani/pg-backup`.
+
+Both images are public. Neither is built locally: a push to `main` that touches
+an image's files publishes it, and a daily check rebuilds it when anything it is
+made from has moved upstream.
+
+## Local stack
 
 Everything in `compose.yml` is driven from `.env`, which is not committed:
 images, ports, database names and credentials. The only literals in the file
@@ -134,7 +145,7 @@ disables a tier.
 | variable | default | meaning |
 |---|---|---|
 | `BACKUP_R2_BUCKET` | required | bucket name |
-| `BACKUP_PREFIX` | `postgres` | path inside the bucket; one per host |
+| `BACKUP_PREFIX` | `postgres` | path inside the bucket; every host uses `<hostname>/postgres` |
 | `BACKUP_REMOTE` | `r2` | rclone remote name, configured through `RCLONE_CONFIG_<REMOTE>_*` |
 | `BACKUP_MINUTE` | `15` | minute past each hour to run |
 | `BACKUP_KEEP_HOURLY` | `48h` | age at which hourly runs are deleted |
@@ -150,12 +161,13 @@ Subcommands, all run through `docker exec pg-backup pg-backup ...`:
 
 | command | does |
 |---|---|
-| `once` | one run now; `once --verify` also restores each dump into `pgbackup_verify` and drops it |
+| `once` | one run now; `once --verify` (or `verify`) also restores each dump into `pgbackup_verify` and drops it |
 | `list [tier]` | the stamps held in `hourly` (default), `daily` or `weekly` |
 | `restore <tier>/<stamp> <db> [target]` | downloads that database's dump, checks it against the manifest and restores it into `target` (created if missing; defaults to `db`) |
 | `health` | the container healthcheck: Postgres reachable, no failed run, and a success or start within the last 125 minutes |
 
-A compose service for a host stack:
+The service as every host runs it, in `~/docker/db/compose.yml` beside
+`postgres` and `redis`, with the prefix set to that host's name:
 
     backup:
       image: ghcr.io/thekiharani/pg-backup:18-trixie
@@ -167,12 +179,12 @@ A compose service for a host stack:
         PGPASSWORD: ${POSTGRES_PASSWORD}
         PGDATABASE: postgres
         BACKUP_R2_BUCKET: ${BACKUP_R2_BUCKET}
-        BACKUP_PREFIX: noria-hz1/postgres
+        BACKUP_PREFIX: norialabs-vm1/postgres
+        BACKUP_MINUTE: "15"
         BACKUP_KEEP_HOURLY: 48h
         BACKUP_KEEP_DAILY: 30d
         BACKUP_KEEP_WEEKLY: 12w
         BACKUP_VERIFY_DAY: "7"
-        BACKUP_HEARTBEAT_URL: ${BACKUP_HEARTBEAT_URL}
         RCLONE_CONFIG_R2_TYPE: s3
         RCLONE_CONFIG_R2_PROVIDER: Cloudflare
         RCLONE_CONFIG_R2_ENDPOINT: ${BACKUP_R2_ENDPOINT}
@@ -188,16 +200,17 @@ A compose service for a host stack:
         driver: json-file
         options: { max-size: "10m", max-file: "5" }
 
-The image carries its own healthcheck, so the service needs none. Hosts that ran
-the earlier local build replace `build:` with `image:`, drop `BACKUP_RETENTION`
-in favour of the three `BACKUP_KEEP_*` variables, and remove the `healthcheck:`
-block. Existing objects under the prefix are left alone; nothing is written at
-the prefix root any more, so delete the old `<date>/` folders by hand once the
-new tiers hold what you need.
+The image carries its own healthcheck and sets `RCLONE_CONFIG=/dev/null`, so the
+service needs neither. The bucket holds nothing but `<hostname>/postgres/` prefixes,
+each with only `hourly/`, `daily/` and `weekly/` beneath it. To remove anything
+else by hand, use `rclone delete <path>` from inside the container; the trimmed
+rclone has no `purge`, and on S3 deleting every object under a path is the same
+thing.
 
 GitHub Actions (`.github/workflows/pg-backup.yml`) builds it exactly like the
 Postgres image: amd64 and arm64 on native runners, joined into one tag, and only
-when something would change. It rebuilds when the Dockerfile or the script
+when something would change. The check runs daily at 04:41 UTC and on any push
+that changes only the workflow. It rebuilds when the Dockerfile or the script
 changes, when the distroless, `debian:trixie-slim` or `golang:1-trixie` digest
 moves (a Go toolchain update changes the TLS and HTTP code compiled into rclone),
 or when PGDG publishes a newer `postgresql-client-18`. A new rclone release opens
@@ -225,8 +238,9 @@ there, not from `compose.yml`.
 ## Protection
 
 Only the owner pushes to `main` and `dev`. Anyone else opens a pull request,
-which needs the owner's approval; that is also how the pgvector bumps arrive,
-since GitHub won't let a personal repository exempt the Actions bot. No one,
+which needs the owner's approval; that is also how the pgvector and rclone
+bumps arrive, since GitHub won't let a personal repository exempt the Actions
+bot. No one,
 the owner included, can force-push or delete either branch. Workflows from
 outside contributors wait for approval, and only GitHub's and Docker's actions
 may run.
