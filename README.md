@@ -44,9 +44,12 @@ Connect from the host at `localhost:3326`, or from the `norialabs` network at
 ## Postgres with pgvector
 
 `postgres.Dockerfile` compiles pgvector from source on the official
-`postgres:18-trixie` and copies only the built extension (~630 kB) onto a clean
-copy of that image, so compilers never reach the final image. It is built
-without `-march=native`, so it runs on any CPU of its architecture.
+`postgres:18-trixie` and copies only the built extension (~800 kB: the stripped
+library, its LLVM bitcode for JIT inlining, and the control and upgrade SQL)
+onto a clean copy of that image, so compilers never reach the final image. The
+release tarball is pinned by `PGVECTOR_SHA256` and BuildKit refuses it on a
+mismatch; the bump pull request updates the version and the checksum together.
+It is built without `-march=native`, so it runs on any CPU of its architecture.
 
 GitHub Actions (`.github/workflows/postgres.yml`) builds it for amd64 and arm64,
 each on its own native Ubuntu 26.04 runner, and joins them into one

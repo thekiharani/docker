@@ -97,7 +97,8 @@ jobs:
                 echo "pgvector $LATEST is out; its pull request is already open"
               else
                 git switch -q -c "$branch"
-                sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/" postgres.Dockerfile
+                sha256=$(curl -fsSL --retry 3 "https://github.com/pgvector/pgvector/archive/refs/tags/v$LATEST.tar.gz" | sha256sum | cut -d' ' -f1)
+                sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/; s/^ARG PGVECTOR_SHA256=.+$/ARG PGVECTOR_SHA256=$sha256/" postgres.Dockerfile
                 git config user.name "github-actions[bot]"
                 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                 git commit -qam "Bump pgvector to $LATEST"
@@ -105,7 +106,7 @@ jobs:
                 gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
                   --title "Bump pgvector to $LATEST" \
                   --body "$(printf '%s\n' \
-                    "pgvector $LATEST is out; this image carries $PINNED." \
+                    "pgvector $LATEST is out; this image carries $PINNED. The tarball's sha256 is $sha256." \
                     "Release notes: https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md" \
                     "" \
                     "Merging builds and publishes \`$IMAGE:$TAG\` with it. Then pull it, recreate the container," \
