@@ -4,8 +4,8 @@ ARG PG_BASE=postgres:${PG_MAJOR}-trixie
 
 FROM ${PG_BASE} AS pgvector
 ARG PG_MAJOR
-ARG PGVECTOR_VERSION=0.8.6
-ARG PGVECTOR_SHA256=10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f
+ARG PGVECTOR_VERSION=0.8.7
+ARG PGVECTOR_SHA256=cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean \
