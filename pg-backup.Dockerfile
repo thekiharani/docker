@@ -3,7 +3,7 @@ ARG PG_MAJOR=18
 ARG BUILD_BASE=debian:trixie-slim
 ARG RUNTIME_BASE=gcr.io/distroless/base-debian13:nonroot
 ARG GO_BASE=golang:1-trixie
-ARG RCLONE_VERSION=1.75.2
+ARG RCLONE_VERSION=1.76.0
 
 FROM ${GO_BASE} AS rclone
 ARG RCLONE_VERSION
