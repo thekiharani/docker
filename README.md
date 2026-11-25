@@ -31,7 +31,7 @@ images fix.
 |---|---|---|
 | `DB_USER` / `DP_PASS` | shared | mariadb, postgres, redis |
 | `MARIADB_IMAGE` / `MARIADB_PORT` / `MARIADB_DATABASE` | `mariadb:13.0`, 3326, `norialabs` | mariadb |
-| `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:18-trixie`, 5452, `norialabs` | postgres |
+| `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:19-trixie`, 5452, `norialabs` | postgres |
 | `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.10-trixie`, 6399 | redis |
 | `MAILPIT_IMAGE` / `MAILPIT_PORT` / `MAILPIT_SMTP_PORT` | `axllent/mailpit`, 8035, 1035 (loopback only) | mailpit |
 | `MYSQL_IMAGE` / `MYSQL_PORT` / `MYSQL_DATABASE` | `mysql:8.4`, 3326, `norialabs` | `compose-db.yaml` only |
@@ -106,12 +106,26 @@ data directory, so an existing volume carries over within a major.
 
 ### Moving to a new major
 
-A data directory belongs to one major. The images keep it at
-`/var/lib/postgresql/<major>/docker`, so pointing an 18 volume at `19-trixie`
-does not fail: it starts a new, empty 19 cluster beside the 18 one. Move the data
-with `pg_dumpall` from the old container into the new one, or `pg_upgrade`, then
-run `ALTER EXTENSION vector UPDATE;` where pgvector is installed. Move the
-host's `pg-backup` to the same major at the same time.
+Each major keeps its data in `/var/lib/postgresql/<major>/docker`, and a newer
+major's image refuses to start on a volume that already holds an older one. With
+the apps stopped, copy the data into a new cluster on the same volume from a
+temporary container that mounts it elsewhere, which the entrypoint's check does
+not cover:
+
+    docker run -d --name pg-new --network <network> -v <volume>:/vol \
+      -e PGDATA=/vol/<new>/docker -e POSTGRES_DB=postgres \
+      -e POSTGRES_USER=<superuser> -e POSTGRES_PASSWORD=<password> \
+      ghcr.io/thekiharani/postgres:<new>-trixie
+    docker exec -e PGPASSWORD=<password> pg-new sh -c \
+      'pg_dumpall -h <old container> -U "$POSTGRES_USER" | psql -U "$POSTGRES_USER" -d postgres -q'
+    docker rm -f pg-new
+
+Re-apply any `ALTER SYSTEM` settings on `pg-new` before the copy, since a dump
+does not carry them. The only expected error is the superuser role already
+existing. Extensions are recreated at the new image's versions, so pgvector needs
+no `ALTER EXTENSION`. Then point the service at the new tag and start it; the old
+major's directory stays as the rollback until you delete it. Move the host's
+`pg-backup` to the same major at the same time.
 
 ### Upgrading pgvector
 
