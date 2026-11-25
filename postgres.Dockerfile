@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG PG_MAJOR=18
+ARG PG_MAJOR=19
 ARG PG_BASE=postgres:${PG_MAJOR}-trixie
 
 FROM ${PG_BASE} AS pgvector
