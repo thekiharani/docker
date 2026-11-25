@@ -11,9 +11,9 @@ them.
   Postgres: hourly `pg_dump` of every database to Cloudflare R2 with hourly,
   daily and weekly retention and verified restores, published as
   `ghcr.io/thekiharani/pg-backup`.
-- `compose.yml` — the local **noria** stack: MariaDB, PostgreSQL with pgvector,
+- `compose.yaml` — the local **noria** stack: MariaDB, PostgreSQL with pgvector,
   Redis and Mailpit, on the external `norialabs` network.
-- `compose-db.yml` — reference only, never run. It keeps the older MySQL and
+- `compose-db.yaml` — reference only, never run. It keeps the older MySQL and
   smartfin service definitions to copy from.
 
 Both images are public. Neither is built locally: a push to `main` that touches
@@ -22,7 +22,7 @@ made from has moved upstream.
 
 ## Local stack
 
-Everything in `compose.yml` is driven from `.env`, which is not committed:
+Everything in `compose.yaml` is driven from `.env`, which is not committed:
 images, ports, database names and credentials. The only literals in the file
 are the container ports on the right-hand side of each mapping, which the
 images fix.
@@ -34,7 +34,7 @@ images fix.
 | `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:18-trixie`, 5452, `norialabs` | postgres |
 | `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.10-trixie`, 6399 | redis |
 | `MAILPIT_IMAGE` / `MAILPIT_PORT` / `MAILPIT_SMTP_PORT` | `axllent/mailpit`, 8035, 1035 (loopback only) | mailpit |
-| `MYSQL_IMAGE` / `MYSQL_PORT` / `MYSQL_DATABASE` | `mysql:8.4`, 3326, `norialabs` | `compose-db.yml` only |
+| `MYSQL_IMAGE` / `MYSQL_PORT` / `MYSQL_DATABASE` | `mysql:8.4`, 3326, `norialabs` | `compose-db.yaml` only |
 
 Host ports are offset by +20 from their defaults so several stacks can coexist
 (5432→5452, 6379→6399, 3306→3326). Mailpit's web UI is the exception, on 8035
@@ -64,7 +64,7 @@ release tarball is pinned by `PGVECTOR_SHA256` and BuildKit refuses it on a
 mismatch; the bump pull request updates the version and the checksum together.
 It is built without `-march=native`, so it runs on any CPU of its architecture.
 
-GitHub Actions (`.github/workflows/postgres.yml`) builds it for amd64 and arm64,
+GitHub Actions (`.github/workflows/postgres.yaml`) builds it for amd64 and arm64,
 each on its own native Ubuntu 26.04 runner, and joins them into one
 multi-platform tag. Don't build it locally.
 
@@ -166,7 +166,7 @@ Subcommands, all run through `docker exec pg-backup pg-backup ...`:
 | `restore <tier>/<stamp> <db> [target]` | downloads that database's dump, checks it against the manifest and restores it into `target` (created if missing; defaults to `db`) |
 | `health` | the container healthcheck: Postgres reachable, no failed run, and a success or start within the last 125 minutes |
 
-The service as every host runs it, in `~/docker/db/compose.yml` beside
+The service as every host runs it, in `~/docker/db/compose.yaml` beside
 `postgres` and `redis`, with the prefix set to that host's name:
 
     backup:
@@ -207,7 +207,7 @@ else by hand, use `rclone delete <path>` from inside the container; the trimmed
 rclone has no `purge`, and on S3 deleting every object under a path is the same
 thing.
 
-GitHub Actions (`.github/workflows/pg-backup.yml`) builds it exactly like the
+GitHub Actions (`.github/workflows/pg-backup.yaml`) builds it exactly like the
 Postgres image: amd64 and arm64 on native runners, joined into one tag, and only
 when something would change. The check runs daily at 04:41 UTC and on any push
 that changes only the workflow. It rebuilds when the Dockerfile or the script
@@ -233,7 +233,7 @@ Tags move. Once a stack is working, lock an image to its digest:
       --format '{{index .RepoDigests 0}}'
 
 and paste the result into `.env` in place of the tag. The images all come from
-there, not from `compose.yml`.
+there, not from `compose.yaml`.
 
 ## Protection
 

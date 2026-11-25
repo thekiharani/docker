@@ -3,7 +3,7 @@ name: pg-backup
 on:
   push:
     branches: [main]
-    paths: [pg-backup.Dockerfile, pg-backup, .github/workflows/pg-backup.yml]
+    paths: [pg-backup.Dockerfile, pg-backup, .github/workflows/pg-backup.yaml]
   schedule:
     - cron: "41 4 * * *"
   workflow_dispatch:
@@ -48,7 +48,7 @@ jobs:
         with:
           fetch-depth: 0
       # Scheduled workflows in public repos are disabled after 60 days without activity; enabling resets that.
-      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/pg-backup.yml/enable"
+      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/pg-backup.yaml/enable"
         env:
           GH_TOKEN: ${{ github.token }}
       - id: upstream

@@ -3,7 +3,7 @@ name: postgres
 on:
   push:
     branches: [main]
-    paths: [postgres.Dockerfile, .github/workflows/postgres.yml]
+    paths: [postgres.Dockerfile, .github/workflows/postgres.yaml]
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
         with:
           fetch-depth: 0
       # Scheduled workflows in public repos are disabled after 60 days without activity; enabling resets that.
-      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/postgres.yml/enable"
+      - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/postgres.yaml/enable"
         env:
           GH_TOKEN: ${{ github.token }}
       - id: upstream
