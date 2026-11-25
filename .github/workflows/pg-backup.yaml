@@ -171,6 +171,7 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
 
   build:
+    name: build ${{ matrix.target.major }} ${{ matrix.platform.arch }}
     needs: check
     if: needs.check.outputs.targets != '[]'
     strategy:
@@ -228,6 +229,7 @@ jobs:
           retention-days: 1
 
   publish:
+    name: publish ${{ matrix.target.major }}
     needs: [check, build]
     if: ${{ !cancelled() && needs.check.result == 'success' && needs.check.outputs.targets != '[]' }}
     strategy:
