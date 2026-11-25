@@ -30,6 +30,7 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
+      majors: ${{ steps.decide.outputs.majors }}
       targets: ${{ steps.decide.outputs.targets }}
       sha_tag: ${{ steps.decide.outputs.sha_tag }}
       pgvector: ${{ steps.pgvector.outputs.pinned }}
@@ -100,7 +101,8 @@ jobs:
             fi
           fi
 
-          targets='[]'
+          majors='[]'
+          targets='{}'
           for major in $MAJORS; do
             base="postgres:$major-trixie"
             base_digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
@@ -130,27 +132,29 @@ jobs:
             if [ "$build" = true ]; then
               targets=$(jq -c --arg major "$major" --arg base "$base" --arg digest "$base_digest" \
                 --argjson latest "$([ "$major" = "$latest_major" ] && echo true || echo false)" \
-                '. + [{major: $major, base: $base, digest: $digest, latest: $latest}]' <<< "$targets")
+                '. + {($major): {base: $base, digest: $digest, latest: $latest}}' <<< "$targets")
+              majors=$(jq -c --arg major "$major" '. + [$major]' <<< "$majors")
             fi
           done
 
           {
+            echo "majors=$majors"
             echo "targets=$targets"
             echo "sha_tag=$sha_tag"
           } | tee -a "$GITHUB_OUTPUT"
 
   build:
-    name: build ${{ matrix.target.major }} ${{ matrix.platform.arch }}
     needs: check
-    if: needs.check.outputs.targets != '[]'
+    if: needs.check.outputs.majors != '[]'
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(needs.check.outputs.targets) }}
-        platform:
-          - { arch: amd64, runner: ubuntu-26.04 }
-          - { arch: arm64, runner: ubuntu-26.04-arm }
-    runs-on: ${{ matrix.platform.runner }}
+        major: ${{ fromJSON(needs.check.outputs.majors) }}
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    env:
+      BASE: ${{ fromJSON(needs.check.outputs.targets)[matrix.major].base }}
+      BASE_DIGEST: ${{ fromJSON(needs.check.outputs.targets)[matrix.major].digest }}
     permissions:
       contents: read
       packages: write
@@ -167,20 +171,20 @@ jobs:
         with:
           context: .
           file: postgres.Dockerfile
-          platforms: linux/${{ matrix.platform.arch }}
+          platforms: linux/${{ matrix.arch }}
           build-args: |
-            PG_MAJOR=${{ matrix.target.major }}
-            PG_BASE=${{ matrix.target.base }}@${{ matrix.target.digest }}
+            PG_MAJOR=${{ matrix.major }}
+            PG_BASE=${{ env.BASE }}@${{ env.BASE_DIGEST }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.base.name=docker.io/library/${{ matrix.target.base }}
-            org.opencontainers.image.base.digest=${{ matrix.target.digest }}
+            org.opencontainers.image.base.name=docker.io/library/${{ env.BASE }}
+            org.opencontainers.image.base.digest=${{ env.BASE_DIGEST }}
             ${{ env.PGVECTOR_LABEL }}=${{ needs.check.outputs.pgvector }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=postgres-${{ matrix.target.major }}-${{ matrix.platform.arch }}
-          cache-to: type=gha,scope=postgres-${{ matrix.target.major }}-${{ matrix.platform.arch }},mode=max
+          cache-from: type=gha,scope=postgres-${{ matrix.major }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=postgres-${{ matrix.major }}-${{ matrix.arch }},mode=max
       - run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -188,27 +192,26 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
       - uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.target.major }}-${{ matrix.platform.arch }}
+          name: digest-${{ matrix.major }}-${{ matrix.arch }}
           path: /tmp/digests/*
           retention-days: 1
 
   publish:
-    name: publish ${{ matrix.target.major }}
     needs: [check, build]
-    if: ${{ !cancelled() && needs.check.result == 'success' && needs.check.outputs.targets != '[]' }}
+    if: ${{ !cancelled() && needs.check.result == 'success' && needs.check.outputs.majors != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(needs.check.outputs.targets) }}
+        major: ${{ fromJSON(needs.check.outputs.majors) }}
     runs-on: ubuntu-26.04
     permissions:
       packages: write
     env:
-      MAJOR: ${{ matrix.target.major }}
+      MAJOR: ${{ matrix.major }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: digest-${{ matrix.target.major }}-*
+          pattern: digest-${{ matrix.major }}-*
           path: /tmp/digests
           merge-multiple: true
       - working-directory: /tmp/digests
@@ -223,7 +226,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tags
         env:
-          LATEST: ${{ matrix.target.latest }}
+          LATEST: ${{ fromJSON(needs.check.outputs.targets)[matrix.major].latest }}
           SHA_TAG: ${{ needs.check.outputs.sha_tag }}
         run: |
           tags="-t $IMAGE:$MAJOR-trixie"
