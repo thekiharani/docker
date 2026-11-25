@@ -19,7 +19,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/thekiharani/postgres
-  TAG: 18-trixie
+  MAJORS: "18 19"
   PGVECTOR_LABEL: com.github.thekiharani.pgvector.version
 
 jobs:
@@ -30,11 +30,9 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      build: ${{ steps.decide.outputs.build }}
+      targets: ${{ steps.decide.outputs.targets }}
       sha_tag: ${{ steps.decide.outputs.sha_tag }}
-      base: ${{ steps.upstream.outputs.base }}
-      base_digest: ${{ steps.upstream.outputs.base_digest }}
-      pgvector: ${{ steps.upstream.outputs.pinned_pgvector }}
+      pgvector: ${{ steps.pgvector.outputs.pinned }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,25 +41,14 @@ jobs:
       - run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/postgres.yaml/enable"
         env:
           GH_TOKEN: ${{ github.token }}
-      - id: upstream
+      - id: pgvector
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pg_major=$(sed -nE 's/^ARG PG_MAJOR=(.+)$/\1/p' postgres.Dockerfile)
-          base="postgres:${pg_major}-trixie"
-          base_digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
-          latest_pgvector=$(gh api repos/pgvector/pgvector/tags --paginate --jq '.[].name' \
-            | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | sort -V | tail -1)
-          pinned_pgvector=$(sed -nE 's/^ARG PGVECTOR_VERSION=(.+)$/\1/p' postgres.Dockerfile)
-          published=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
-            | jq -c '."linux/amd64".config.Labels // {}' || echo '{}')
           {
-            echo "base=$base"
-            echo "base_digest=$base_digest"
-            echo "latest_pgvector=$latest_pgvector"
-            echo "pinned_pgvector=$pinned_pgvector"
-            echo "published_base_digest=$(jq -r '."org.opencontainers.image.base.digest" // ""' <<< "$published")"
-            echo "published_pgvector=$(jq -r --arg l "$PGVECTOR_LABEL" '.[$l] // ""' <<< "$published")"
+            echo "latest=$(gh api repos/pgvector/pgvector/tags --paginate --jq '.[].name' \
+              | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | sort -V | tail -1)"
+            echo "pinned=$(sed -nE 's/^ARG PGVECTOR_VERSION=(.+)$/\1/p' postgres.Dockerfile)"
           } | tee -a "$GITHUB_OUTPUT"
       - id: decide
         env:
@@ -69,85 +56,100 @@ jobs:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           FORCE: ${{ inputs.force }}
-          BASE_DIGEST: ${{ steps.upstream.outputs.base_digest }}
-          LATEST: ${{ steps.upstream.outputs.latest_pgvector }}
-          PINNED: ${{ steps.upstream.outputs.pinned_pgvector }}
-          PUBLISHED_BASE_DIGEST: ${{ steps.upstream.outputs.published_base_digest }}
-          PUBLISHED_PGVECTOR: ${{ steps.upstream.outputs.published_pgvector }}
+          LATEST: ${{ steps.pgvector.outputs.latest }}
+          PINNED: ${{ steps.pgvector.outputs.pinned }}
         run: |
           sha_tag=false
-          build=false
+          latest_major=$(printf '%s\n' $MAJORS | sort -n | tail -1)
 
           dockerfile_changed=false
           if [ "$EVENT" = push ]; then
             if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
               || ! git diff --quiet "$BEFORE" "$GITHUB_SHA" -- postgres.Dockerfile; then
               dockerfile_changed=true
+              sha_tag=true
+              echo "postgres.Dockerfile changed"
             fi
           fi
 
-          if [ "$dockerfile_changed" = true ]; then
-            build=true
-            sha_tag=true
-            echo "postgres.Dockerfile changed"
-          else
-            if [ -n "$LATEST" ] && [ "$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -1)" != "$PINNED" ]; then
-              branch="pgvector-$LATEST"
-              if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-                echo "pgvector $LATEST is out; its pull request is already open"
-              else
-                git switch -q -c "$branch"
-                sha256=$(curl -fsSL --retry 3 "https://github.com/pgvector/pgvector/archive/refs/tags/v$LATEST.tar.gz" | sha256sum | cut -d' ' -f1)
-                sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/; s/^ARG PGVECTOR_SHA256=.+$/ARG PGVECTOR_SHA256=$sha256/" postgres.Dockerfile
-                git config user.name "github-actions[bot]"
-                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                git commit -qam "Bump pgvector to $LATEST"
-                git push -q origin "$branch"
-                gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
-                  --title "Bump pgvector to $LATEST" \
-                  --body "$(printf '%s\n' \
-                    "pgvector $LATEST is out; this image carries $PINNED. The tarball's sha256 is $sha256." \
-                    "Release notes: https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md" \
-                    "" \
-                    "Merging builds and publishes \`$IMAGE:$TAG\` with it. Then pull it, recreate the container," \
-                    "and in every database that has the extension, \`template1\` included, run:" \
-                    "" \
-                    "    ALTER EXTENSION vector UPDATE;")"
-                git switch -q -
-                echo "pgvector $PINNED -> $LATEST: opened a pull request"
+          if [ "$dockerfile_changed" = false ] && [ -n "$LATEST" ] \
+            && [ "$(printf '%s\n%s\n' "$PINNED" "$LATEST" | sort -V | tail -1)" != "$PINNED" ]; then
+            branch="pgvector-$LATEST"
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+              echo "pgvector $LATEST is out; its pull request is already open"
+            else
+              git switch -q -c "$branch"
+              sha256=$(curl -fsSL --retry 3 "https://github.com/pgvector/pgvector/archive/refs/tags/v$LATEST.tar.gz" | sha256sum | cut -d' ' -f1)
+              sed -i -E "s/^ARG PGVECTOR_VERSION=.+$/ARG PGVECTOR_VERSION=$LATEST/; s/^ARG PGVECTOR_SHA256=.+$/ARG PGVECTOR_SHA256=$sha256/" postgres.Dockerfile
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -qam "Bump pgvector to $LATEST"
+              git push -q origin "$branch"
+              gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
+                --title "Bump pgvector to $LATEST" \
+                --body "$(printf '%s\n' \
+                  "pgvector $LATEST is out; this image carries $PINNED. The tarball's sha256 is $sha256." \
+                  "Release notes: https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md" \
+                  "" \
+                  "Merging builds and publishes \`$IMAGE\` for Postgres $MAJORS with it. Then pull it, recreate the container," \
+                  "and in every database that has the extension, \`template1\` included, run:" \
+                  "" \
+                  "    ALTER EXTENSION vector UPDATE;")"
+              git switch -q -
+              echo "pgvector $PINNED -> $LATEST: opened a pull request"
+            fi
+          fi
+
+          targets='[]'
+          for major in $MAJORS; do
+            base="postgres:$major-trixie"
+            base_digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
+            [ -n "$base_digest" ] || { echo "::error::$base not found"; exit 1; }
+            published=$(docker buildx imagetools inspect "$IMAGE:$major-trixie" --format '{{json .Image}}' 2>/dev/null \
+              | jq -c '."linux/amd64".config.Labels // {}' || echo '{}')
+            published_base_digest=$(jq -r '."org.opencontainers.image.base.digest" // ""' <<< "$published")
+            published_pgvector=$(jq -r --arg l "$PGVECTOR_LABEL" '.[$l] // ""' <<< "$published")
+
+            build=$dockerfile_changed
+            if [ "$dockerfile_changed" = false ]; then
+              if [ "$base_digest" != "$published_base_digest" ]; then
+                build=true
+                echo "$major: base image changed: ${published_base_digest:-none} -> $base_digest"
+              fi
+              if [ "$PINNED" != "$published_pgvector" ]; then
+                build=true
+                echo "$major: published pgvector ${published_pgvector:-none} differs from $PINNED"
+              fi
+              if [ "$FORCE" = true ]; then
+                build=true
+                echo "$major: forced"
               fi
             fi
-            if [ "$BASE_DIGEST" != "$PUBLISHED_BASE_DIGEST" ]; then
-              build=true
-              echo "base image changed: ${PUBLISHED_BASE_DIGEST:-none} -> $BASE_DIGEST"
-            fi
-            if [ "$PINNED" != "$PUBLISHED_PGVECTOR" ]; then
-              build=true
-              echo "published pgvector ${PUBLISHED_PGVECTOR:-none} differs from $PINNED"
-            fi
-            if [ "$FORCE" = true ]; then
-              build=true
-              echo "forced"
-            fi
-          fi
 
-          echo "build: $build"
+            echo "$major: build $build"
+            if [ "$build" = true ]; then
+              targets=$(jq -c --arg major "$major" --arg base "$base" --arg digest "$base_digest" \
+                --argjson latest "$([ "$major" = "$latest_major" ] && echo true || echo false)" \
+                '. + [{major: $major, base: $base, digest: $digest, latest: $latest}]' <<< "$targets")
+            fi
+          done
+
           {
-            echo "build=$build"
+            echo "targets=$targets"
             echo "sha_tag=$sha_tag"
-          } >> "$GITHUB_OUTPUT"
+          } | tee -a "$GITHUB_OUTPUT"
 
   build:
     needs: check
-    if: needs.check.outputs.build == 'true'
+    if: needs.check.outputs.targets != '[]'
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-26.04
-          - arch: arm64
-            runner: ubuntu-26.04-arm
-    runs-on: ${{ matrix.runner }}
+        target: ${{ fromJSON(needs.check.outputs.targets) }}
+        platform:
+          - { arch: amd64, runner: ubuntu-26.04 }
+          - { arch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
       packages: write
@@ -164,18 +166,20 @@ jobs:
         with:
           context: .
           file: postgres.Dockerfile
-          platforms: linux/${{ matrix.arch }}
-          build-args: PG_BASE=${{ needs.check.outputs.base }}@${{ needs.check.outputs.base_digest }}
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            PG_MAJOR=${{ matrix.target.major }}
+            PG_BASE=${{ matrix.target.base }}@${{ matrix.target.digest }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.base.name=docker.io/library/${{ needs.check.outputs.base }}
-            org.opencontainers.image.base.digest=${{ needs.check.outputs.base_digest }}
+            org.opencontainers.image.base.name=docker.io/library/${{ matrix.target.base }}
+            org.opencontainers.image.base.digest=${{ matrix.target.digest }}
             ${{ env.PGVECTOR_LABEL }}=${{ needs.check.outputs.pgvector }}
           provenance: mode=max
           sbom: true
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=postgres-${{ matrix.arch }}
-          cache-to: type=gha,scope=postgres-${{ matrix.arch }},mode=max
+          cache-from: type=gha,scope=postgres-${{ matrix.target.major }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=postgres-${{ matrix.target.major }}-${{ matrix.platform.arch }},mode=max
       - run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
@@ -183,21 +187,32 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
       - uses: actions/upload-artifact@v7
         with:
-          name: digest-${{ matrix.arch }}
+          name: digest-${{ matrix.target.major }}-${{ matrix.platform.arch }}
           path: /tmp/digests/*
           retention-days: 1
 
   publish:
     needs: [check, build]
+    if: ${{ !cancelled() && needs.check.result == 'success' && needs.check.outputs.targets != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.check.outputs.targets) }}
     runs-on: ubuntu-26.04
     permissions:
       packages: write
+    env:
+      MAJOR: ${{ matrix.target.major }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: digest-*
+          pattern: digest-${{ matrix.target.major }}-*
           path: /tmp/digests
           merge-multiple: true
+      - working-directory: /tmp/digests
+        run: |
+          count=$(ls | wc -l)
+          [ "$count" -eq 2 ] || { echo "::error::Postgres $MAJOR has $count of 2 platform builds"; exit 1; }
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -206,13 +221,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tags
         env:
+          LATEST: ${{ matrix.target.latest }}
           SHA_TAG: ${{ needs.check.outputs.sha_tag }}
         run: |
-          tags="-t $IMAGE:latest -t $IMAGE:$TAG"
+          tags="-t $IMAGE:$MAJOR-trixie"
+          if [ "$LATEST" = true ]; then
+            tags="$tags -t $IMAGE:latest"
+          fi
           if [ "$SHA_TAG" = true ]; then
-            tags="$tags -t $IMAGE:$TAG-${GITHUB_SHA:0:7}"
+            tags="$tags -t $IMAGE:$MAJOR-trixie-${GITHUB_SHA:0:7}"
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - working-directory: /tmp/digests
         run: docker buildx imagetools create ${{ steps.tags.outputs.tags }} $(printf "$IMAGE@sha256:%s " *)
-      - run: docker buildx imagetools inspect "$IMAGE:latest"
+      - run: docker buildx imagetools inspect "$IMAGE:$MAJOR-trixie"

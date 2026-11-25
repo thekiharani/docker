@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG PG_MAJOR=18
+ARG PG_MAJOR=19
 ARG BUILD_BASE=debian:trixie-slim
 ARG RUNTIME_BASE=gcr.io/distroless/base-debian13:nonroot
 ARG GO_BASE=golang:1-trixie

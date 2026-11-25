@@ -4,8 +4,8 @@ Two images every Noria Labs database stack runs, built and kept current by
 GitHub Actions and published to GHCR, plus the local OrbStack stacks that use
 them.
 
-- `postgres.Dockerfile` — PostgreSQL 18 on Debian trixie with pgvector compiled
-  in, published as `ghcr.io/thekiharani/postgres`. Runs on every host and
+- `postgres.Dockerfile` — PostgreSQL 19 and 18 on Debian trixie with pgvector
+  compiled in, published as `ghcr.io/thekiharani/postgres`. Runs on every host and
   locally.
 - `pg-backup.Dockerfile` and `pg-backup` — the backup sidecar beside each
   Postgres: hourly `pg_dump` of every database to Cloudflare R2 with hourly,
@@ -57,24 +57,28 @@ Connect from the host at `localhost:3326`, or from the `norialabs` network at
 ## Postgres with pgvector
 
 `postgres.Dockerfile` compiles pgvector from source on the official
-`postgres:18-trixie` and copies only the built extension (~800 kB: the stripped
+`postgres:<major>-trixie` and copies only the built extension (~800 kB: the stripped
 library, its LLVM bitcode for JIT inlining, and the control and upgrade SQL)
 onto a clean copy of that image, so compilers never reach the final image. The
 release tarball is pinned by `PGVECTOR_SHA256` and BuildKit refuses it on a
 mismatch; the bump pull request updates the version and the checksum together.
 It is built without `-march=native`, so it runs on any CPU of its architecture.
 
-GitHub Actions (`.github/workflows/postgres.yaml`) builds it for amd64 and arm64,
-each on its own native Ubuntu 26.04 runner, and joins them into one
-multi-platform tag. Don't build it locally.
+GitHub Actions (`.github/workflows/postgres.yaml`) builds it for every Postgres
+major in the workflow's `MAJORS` (`18 19`), for amd64 and arm64, each on its own
+native Ubuntu 26.04 runner, and joins each major's pair into one multi-platform
+tag. Don't build it locally. Each major is checked and rebuilt on its own, so a
+new Postgres 18 base rebuilds 18 and leaves 19 alone. To add a major, append it
+to `MAJORS`; to drop one, remove it, and its tags stay published but stop
+moving.
 
 It rebuilds only when the image would change: a push that changes
 `postgres.Dockerfile`, or a check that finds upstream has moved. The check runs
 every day at 04:17 UTC and on any push that changes only the workflow; pushes
 that touch nothing else run nothing. It rebuilds when it finds:
 
-- **Postgres or Debian:** the current `postgres:18-trixie` digest differs from
-  the one the published image was built on. It rebuilds on the new base.
+- **Postgres or Debian:** the current `postgres:<major>-trixie` digest differs
+  from the one that major's published image was built on. It rebuilds on the new base.
 - **pgvector:** a newer release than `PGVECTOR_VERSION`. It opens a pull request
   bumping it, and merging that builds the new version like any Dockerfile change.
 
@@ -86,17 +90,28 @@ published. Run the workflow from the Actions tab to check now, and tick
 
 | tag | points at |
 |---|---|
-| `latest`, `18-trixie` | the newest build, including base-image rebuilds |
-| `18-trixie-<short sha>` | the build of that commit, including pgvector bumps; never moved |
+| `19-trixie`, `18-trixie` | the newest build of that major, including base-image rebuilds |
+| `latest` | the same as the highest major, now `19-trixie` |
+| `<major>-trixie-<short sha>` | the build of that commit, including pgvector bumps; never moved |
 
-Set `POSTGRES_IMAGE` to `18-trixie` to follow updates, or to a sha tag to hold
-still. Then:
+Set `POSTGRES_IMAGE` to a major's tag to follow updates within it, or to a sha
+tag to hold still. Avoid `latest` for anything with data: it moves to the next
+major when one is added. Then:
 
     docker compose pull noria_postgres && docker compose up -d noria_postgres
 
-The image is a drop-in replacement for `postgres:18-trixie` and
-`pgvector/pgvector:pg18-trixie`: same entrypoint, environment variables and
-data directory, so an existing volume carries over.
+Each tag is a drop-in replacement for `postgres:<major>-trixie` and
+`pgvector/pgvector:pg<major>-trixie`: same entrypoint, environment variables and
+data directory, so an existing volume carries over within a major.
+
+### Moving to a new major
+
+A data directory belongs to one major. The images keep it at
+`/var/lib/postgresql/<major>/docker`, so pointing an 18 volume at `19-trixie`
+does not fail: it starts a new, empty 19 cluster beside the 18 one. Move the data
+with `pg_dumpall` from the old container into the new one, or `pg_upgrade`, then
+run `ALTER EXTENSION vector UPDATE;` where pgvector is installed. Move the
+host's `pg-backup` to the same major at the same time.
 
 ### Upgrading pgvector
 
@@ -119,8 +134,9 @@ new version, in each database it names:
 
 `pg-backup.Dockerfile` builds `ghcr.io/thekiharani/pg-backup` on
 `gcr.io/distroless/base-debian13`, which brings only glibc, OpenSSL, zlib, CA
-certificates and tzdata. A throwaway `debian:trixie-slim` stage installs
-`postgresql-client-18` from PGDG, after checking the signing key's fingerprint,
+certificates and tzdata. It is built once per Postgres major, like the server
+image, so the client matches the server it backs up. A throwaway
+`debian:trixie-slim` stage installs `postgresql-client-<major>` from PGDG, after checking the signing key's fingerprint,
 and stages what the runtime needs: the seven client binaries (`pg_dump`,
 `pg_dumpall`, `pg_restore`, `psql`, `pg_isready`, `createdb`, `dropdb`), the
 shared libraries `ldd` says they need beyond what distroless already has, and a
@@ -208,12 +224,12 @@ rclone has no `purge`, and on S3 deleting every object under a path is the same
 thing.
 
 GitHub Actions (`.github/workflows/pg-backup.yaml`) builds it exactly like the
-Postgres image: amd64 and arm64 on native runners, joined into one tag, and only
-when something would change. The check runs daily at 04:41 UTC and on any push
+Postgres image: each major in `MAJORS`, amd64 and arm64 on native runners,
+joined into one tag per major, and only when something would change. The check runs daily at 04:41 UTC and on any push
 that changes only the workflow. It rebuilds when the Dockerfile or the script
 changes, when the distroless, `debian:trixie-slim` or `golang:1-trixie` digest
 moves (a Go toolchain update changes the TLS and HTTP code compiled into rclone),
-or when PGDG publishes a newer `postgresql-client-18`. A new rclone release opens
+or when PGDG publishes a newer `postgresql-client-<major>`. A new rclone release opens
 a pull request bumping `RCLONE_VERSION`. The labels
 `org.opencontainers.image.base.digest`, `com.github.thekiharani.build-base.digest`,
 `com.github.thekiharani.go-base.digest`,
@@ -222,8 +238,13 @@ a pull request bumping `RCLONE_VERSION`. The labels
 
 | tag | points at |
 |---|---|
-| `latest`, `18-trixie` | the newest build, including base and client rebuilds |
-| `18-trixie-<short sha>` | the build of that commit; never moved |
+| `19-trixie`, `18-trixie` | the newest build of that major, including base and client rebuilds |
+| `latest` | the same as the highest major, now `19-trixie` |
+| `<major>-trixie-<short sha>` | the build of that commit; never moved |
+
+Use the tag matching the host's Postgres. A newer `pg_dump` reads an older
+server, but the weekly verify restores into that same server, and a newer dump
+is not guaranteed to restore into an older one.
 
 ## Pinning
 
