@@ -106,12 +106,35 @@ data directory, so an existing volume carries over within a major.
 
 ### Moving to a new major
 
-A data directory belongs to one major. The images keep it at
-`/var/lib/postgresql/<major>/docker`, so pointing an 18 volume at `19-trixie`
-does not fail: it starts a new, empty 19 cluster beside the 18 one. Move the data
-with `pg_dumpall` from the old container into the new one, or `pg_upgrade`, then
-run `ALTER EXTENSION vector UPDATE;` where pgvector is installed. Move the
-host's `pg-backup` to the same major at the same time.
+A data directory belongs to one major, kept at `/var/lib/postgresql/<major>/docker`.
+Pointing a volume that holds 18 data at `19-trixie` refuses to start: the
+entrypoint will not initialise a new major beside an old one. Copy the data into a
+19 cluster on the same volume instead, leaving the 18 directory as the rollback.
+The local stack moved from 18 to 19 this way in four minutes for 5 GB:
+
+    set -a; . ./.env; set +a
+    docker run -d --name noria_postgres19 --network norialabs \
+      -v noria_postgres_data:/vol -e PGDATA=/vol/19/docker \
+      -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD="$DP_PASS" -e POSTGRES_DB=postgres \
+      ghcr.io/thekiharani/postgres:19-trixie
+    docker exec noria_postgres19 psql -U "$DB_USER" -d postgres \
+      -c "ALTER SYSTEM SET max_locks_per_transaction = 256"
+    docker restart noria_postgres19
+    docker exec -e PGPASSWORD="$DP_PASS" noria_postgres19 sh -c \
+      'pg_dumpall -h noria_postgres -U "$POSTGRES_USER" | psql -U "$POSTGRES_USER" -d postgres -q'
+    docker rm -f noria_postgres19
+
+Mounting at `/vol` with an explicit `PGDATA` is what gets past the entrypoint's
+check; once `19/docker` exists, the compose service starts on it normally.
+`ALTER SYSTEM` settings are not in a dump, so carry them by hand. The only
+expected error is the superuser role already existing. Stop the apps first, and
+compare table and row counts per database before switching. Then set
+`POSTGRES_IMAGE` to `19-trixie` in `.env`, in a shell that has not sourced the
+old one, since an exported variable overrides `.env`, and run
+`docker compose up -d noria_postgres`. Extensions are recreated at the new
+image's versions, so pgvector needs no `ALTER EXTENSION`. Once 19 has proved
+itself, `docker exec noria_postgres rm -rf /var/lib/postgresql/18` frees the old
+copy. Move the host's `pg-backup` to the same major at the same time.
 
 ### Upgrading pgvector
 
