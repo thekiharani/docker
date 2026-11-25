@@ -32,7 +32,7 @@ images fix.
 | `DB_USER` / `DP_PASS` | shared | mariadb, postgres, redis |
 | `MARIADB_IMAGE` / `MARIADB_PORT` / `MARIADB_DATABASE` | `mariadb:13.0`, 3326, `norialabs` | mariadb |
 | `POSTGRES_IMAGE` / `POSTGRES_PORT` / `POSTGRES_DB` | `ghcr.io/thekiharani/postgres:19-trixie`, 5452, `norialabs` | postgres |
-| `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.10-trixie`, 6399 | redis |
+| `REDIS_IMAGE` / `REDIS_PORT` | `redis:8.12-trixie`, 6399 | redis |
 | `MAILPIT_IMAGE` / `MAILPIT_PORT` / `MAILPIT_SMTP_PORT` | `axllent/mailpit`, 8035, 1035 (loopback only) | mailpit |
 | `MYSQL_IMAGE` / `MYSQL_PORT` / `MYSQL_DATABASE` | `mysql:8.4`, 3326, `norialabs` | `compose-db.yaml` only |
 
@@ -264,7 +264,7 @@ is not guaranteed to restore into an older one.
 
 Tags move. Once a stack is working, lock an image to its digest:
 
-    docker image inspect redis:8.10-trixie \
+    docker image inspect redis:8.12-trixie \
       --format '{{index .RepoDigests 0}}'
 
 and paste the result into `.env` in place of the tag. The images all come from
